@@ -1,0 +1,3 @@
+edge-tts --list-voices
+
+ELEVENLABS_API_KEY=sk_cc45028bb5a2027ff4f61bcf204d7eea76a43895865fe217

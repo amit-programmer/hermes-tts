@@ -1,0 +1,17 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchaudio
+gradio>=4.0.0
+fastapi
+uvicorn[standard]
+soundfile
+numpy
+python-dotenv
+requests
+kokoro>=0.3.4
+edge-tts>=7.0.0
+elevenlabs
+nest-asyncio
+httpx
+pydantic
+num2words
