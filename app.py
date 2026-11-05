@@ -27,6 +27,15 @@ from utils.text_cleaner import (
 )
 from utils.audio_processor import convert_audio_format, stitch_audio_chunks
 
+# ZeroGPU compatibility guard (satisfies Hugging Face ZeroGPU startup check)
+try:
+    import spaces
+    @spaces.GPU(duration=60)
+    def spaces_gpu_worker():
+        return True
+except Exception:
+    pass
+
 
 async def gradio_synthesize(text: str, engine: str, persona: str, voice_profile: str, audio_format: str):
     """
