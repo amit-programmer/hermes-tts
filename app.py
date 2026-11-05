@@ -30,11 +30,12 @@ from utils.audio_processor import convert_audio_format, stitch_audio_chunks
 # ZeroGPU compatibility guard (satisfies Hugging Face ZeroGPU startup check)
 try:
     import spaces
-    @spaces.GPU(duration=60)
-    def spaces_gpu_worker():
-        return True
+    gpu_decorator = spaces.GPU(duration=120)
+    print("[INFO] Hugging Face ZeroGPU detected.")
 except Exception:
-    pass
+    def gpu_decorator(func):
+        return func
+    print("[INFO] Running in standard CPU mode.")
 
 
 async def gradio_synthesize(text: str, engine: str, persona: str, voice_profile: str, audio_format: str):
@@ -103,6 +104,23 @@ async def gradio_synthesize(text: str, engine: str, persona: str, voice_profile:
     except Exception as e:
         elapsed_ms = int((time.time() - t0) * 1000)
         return None, f"❌ Synthesis failed ({elapsed_ms} ms): {str(e)}", "Error", "Error", ""
+
+
+@gpu_decorator
+def gradio_synthesize_sync(text: str, engine: str, persona: str, voice_profile: str, audio_format: str):
+    """ZeroGPU / Synchronous entry point for Gradio UI synthesis button."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    if loop.is_running():
+        import nest_asyncio
+        nest_asyncio.apply()
+
+    return loop.run_until_complete(gradio_synthesize(text, engine, persona, voice_profile, audio_format))
 
 
 # =====================================================================
@@ -199,7 +217,7 @@ with gr.Blocks(title="Hermes Voice Assistant Studio", theme=theme) as demo:
             )
 
             synth_btn.click(
-                fn=gradio_synthesize,
+                fn=gradio_synthesize_sync,
                 inputs=[text_input, engine_dropdown, persona_dropdown, voice_dropdown, format_dropdown],
                 outputs=[audio_output, status_text, routing_text, lang_text, cleaned_preview],
             )
