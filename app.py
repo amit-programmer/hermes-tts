@@ -133,7 +133,7 @@ theme = gr.themes.Soft(
     font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"],
 )
 
-with gr.Blocks(title="Hermes Voice Assistant Studio", theme=theme) as demo:
+with gr.Blocks(title="Hermes Voice Assistant Studio") as demo:
     gr.Markdown(
         """
         # 🎙️ Hermes AI Voice Assistant Studio
@@ -295,4 +295,13 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 7860 if os.getenv("SPACE_ID") else 8006))
     host = os.getenv("HOST", "0.0.0.0")
     print(f"\n[HERMES] Starting Unified Studio on http://{host}:{port}")
-    uvicorn.run(app, host=host, port=port)
+    try:
+        uvicorn.run(app, host=host, port=port)
+    except OSError as e:
+        if "already in use" in str(e).lower() or getattr(e, "errno", None) == 98:
+            print(f"[WARN] Port {port} busy, waiting 3s for socket release...")
+            import time
+            time.sleep(3)
+            uvicorn.run(app, host=host, port=port)
+        else:
+            raise
