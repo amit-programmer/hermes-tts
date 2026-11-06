@@ -1,5 +1,9 @@
 import os
 import sys
+
+# Disable Gradio SSR Node.js proxy from binding to port 7860 before Uvicorn
+os.environ["GRADIO_SSR_MODE"] = "false"
+
 import time
 import tempfile
 import gradio as gr
