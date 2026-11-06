@@ -17,3 +17,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: git push --force https://Amitansuranjan:$HF_TOKEN@huggingface.co/spaces/Amitansuranjan/hermes-tts main
+

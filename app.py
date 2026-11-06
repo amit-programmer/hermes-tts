@@ -27,15 +27,19 @@ from utils.text_cleaner import (
 )
 from utils.audio_processor import convert_audio_format, stitch_audio_chunks
 
-# ZeroGPU compatibility guard (satisfies Hugging Face ZeroGPU startup check)
+# ZeroGPU compatibility guard & decorator
 try:
     import spaces
-    gpu_decorator = spaces.GPU(duration=120)
-    print("[INFO] Hugging Face ZeroGPU detected.")
-except Exception:
-    def gpu_decorator(func):
-        return func
-    print("[INFO] Running in standard CPU mode.")
+    print("[HERMES] Hugging Face ZeroGPU detected.")
+except ImportError:
+    class MockSpaces:
+        @staticmethod
+        def GPU(duration=60):
+            def decorator(func):
+                return func
+            return decorator
+    spaces = MockSpaces()
+    print("[HERMES] Running in standard CPU mode.")
 
 
 async def gradio_synthesize(text: str, engine: str, persona: str, voice_profile: str, audio_format: str):
@@ -106,7 +110,7 @@ async def gradio_synthesize(text: str, engine: str, persona: str, voice_profile:
         return None, f"❌ Synthesis failed ({elapsed_ms} ms): {str(e)}", "Error", "Error", ""
 
 
-@gpu_decorator
+@spaces.GPU(duration=120)
 def gradio_synthesize_sync(text: str, engine: str, persona: str, voice_profile: str, audio_format: str):
     """ZeroGPU / Synchronous entry point for Gradio UI synthesis button."""
     import asyncio
@@ -291,6 +295,17 @@ demo.queue(default_concurrency_limit=10, max_size=32)
 app = gr.mount_gradio_app(fastapi_app, demo, path="/")
 
 if __name__ == "__main__":
+    # 1. ZeroGPU registration handshake (required when gr.mount_gradio_app bypasses demo.launch)
+    try:
+        from spaces import zero as _spaces_zero
+        if hasattr(_spaces_zero, "startup"):
+            _spaces_zero.startup()
+            print("[HERMES] ZeroGPU startup report sent successfully.", flush=True)
+        else:
+            print("[HERMES] spaces.zero.startup not present (CPU mode)", flush=True)
+    except Exception as error:
+        print(f"[HERMES] ZeroGPU startup skipped: {error!r}", flush=True)
+
     import uvicorn
     port = int(os.getenv("PORT", 7860 if os.getenv("SPACE_ID") else 8006))
     host = os.getenv("HOST", "0.0.0.0")
