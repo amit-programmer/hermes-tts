@@ -12,7 +12,7 @@ sys.path.append(str(BASE_DIR))
 
 load_dotenv(BASE_DIR / ".env")
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response, File, UploadFile, Form
 from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -88,11 +88,12 @@ kokoro_engine = None
 chattts_engine = None
 elevenlabs_engine = None
 edge_engine = None
+whisper_engine = None
 
 @app.on_event("startup")
 async def startup_event():
-    global kokoro_engine, chattts_engine, elevenlabs_engine, edge_engine
-    print("\n[INFO] Starting TTS engine pre-warming...")
+    global kokoro_engine, chattts_engine, elevenlabs_engine, edge_engine, whisper_engine
+    print("\n[INFO] Starting TTS & STT voice engine pre-warming...")
 
     # 1. Kokoro init
     try:
@@ -131,7 +132,15 @@ async def startup_event():
     except Exception as e:
         print(f"[ERROR] Failed to load Edge-TTS: {e}")
 
-    print("[INFO] Unified Hybrid Voice Engines startup complete.")
+    # 5. Whisper STT init
+    try:
+        from core.whisper_engine import WhisperEngine
+        whisper_engine = WhisperEngine()
+        print("[SUCCESS] Whisper STT Engine ready.")
+    except Exception as e:
+        print(f"[ERROR] Failed to load Whisper STT: {e}")
+
+    print("[INFO] Unified Hybrid Voice Engines (TTS + STT) startup complete.")
     AUDIO_CACHE.clear()
 
 
@@ -151,10 +160,97 @@ def health_check():
             "edge": edge_engine is not None,
             "kokoro": kokoro_engine is not None,
             "elevenlabs": elevenlabs_engine is not None,
+            "whisper_stt": whisper_engine is not None,
         },
+        "capabilities": ["TTS", "STT"],
         "audio_cache_entries": len(AUDIO_CACHE),
-        "version": "2.0.0",
+        "version": "2.1.0",
     }
+
+
+# =====================================================================
+# Speech-to-Text (STT) Endpoints
+# =====================================================================
+
+@app.post("/v1/stt/transcribe")
+async def transcribe_audio_endpoint(
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    task: str = Form("transcribe"),
+):
+    """
+    Speech-to-Text (STT) endpoint:
+    Transcribes uploaded audio (WAV, MP3, OGG, WEBM, M4A) using Whisper.
+    """
+    global whisper_engine
+    if whisper_engine is None:
+        try:
+            from core.whisper_engine import WhisperEngine
+            whisper_engine = WhisperEngine()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Whisper STT engine unavailable: {e}")
+
+    try:
+        audio_bytes = await file.read()
+        if not audio_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            whisper_engine.transcribe,
+            audio_bytes,
+            language,
+            task,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+
+@app.post("/v1/audio/transcriptions")
+async def openai_compatible_transcription(
+    file: UploadFile = File(...),
+    model: Optional[str] = Form("whisper-1"),
+    language: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
+    response_format: Optional[str] = Form("json"),
+    temperature: Optional[float] = Form(0.0),
+):
+    """
+    OpenAI-compatible Whisper Audio Transcription Endpoint.
+    Drop-in replacement for api.openai.com/v1/audio/transcriptions.
+    """
+    global whisper_engine
+    if whisper_engine is None:
+        try:
+            from core.whisper_engine import WhisperEngine
+            whisper_engine = WhisperEngine()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Whisper STT engine unavailable: {e}")
+
+    try:
+        audio_bytes = await file.read()
+        if not audio_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            whisper_engine.transcribe,
+            audio_bytes,
+            language,
+            "transcribe",
+        )
+        if response_format == "text":
+            return Response(content=result.get("text", ""), media_type="text/plain")
+        return {"text": result.get("text", "")}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 
 class TTSRequest(BaseModel):

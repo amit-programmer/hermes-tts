@@ -131,6 +131,26 @@ def gradio_synthesize_sync(text: str, engine: str, persona: str, voice_profile: 
     return loop.run_until_complete(gradio_synthesize(text, engine, persona, voice_profile, audio_format))
 
 
+@spaces.GPU(duration=60)
+def gradio_transcribe_audio(audio_path: str, language: str):
+    """ZeroGPU / Speech-to-Text transcription entry point for Gradio UI using Whisper."""
+    if not audio_path or not os.path.exists(audio_path):
+        return "❌ No audio provided. Please record audio from microphone or upload a file.", ""
+
+    try:
+        from core.whisper_engine import WhisperEngine
+        engine = WhisperEngine()
+        result = engine.transcribe(audio_path, language=language)
+        text = result.get("text", "")
+        duration = result.get("duration_ms", 0)
+        lang = result.get("language", "auto")
+        dev = result.get("device", "cpu")
+        info = f"✅ Transcribed in **{duration} ms** | Language: **{lang}** | Hardware: **{dev.upper()}**"
+        return text, info
+    except Exception as e:
+        return f"❌ Transcription failed: {str(e)}", ""
+
+
 # =====================================================================
 # Gradio Studio User Interface (Blocks)
 # =====================================================================
@@ -230,14 +250,98 @@ with gr.Blocks(title="Hermes Voice Assistant Studio") as demo:
                 outputs=[audio_output, status_text, routing_text, lang_text, cleaned_preview],
             )
 
+        with gr.TabItem("🎧 Speech-to-Text (STT) Studio"):
+            gr.Markdown(
+                """
+                ### 🎙️ Whisper Speech Recognition (ZeroGPU / Blackwell Accelerated)
+                Record your voice or upload an audio file (`.wav`, `.mp3`, `.m4a`, `.ogg`, `.webm`) to transcribe **Hindi, Hinglish, English, and 90+ languages** in real time.
+                """
+            )
+            with gr.Row():
+                with gr.Column(scale=3):
+                    audio_input = gr.Audio(
+                        sources=["microphone", "upload"],
+                        type="filepath",
+                        label="Record Voice or Upload Audio File",
+                    )
+                    with gr.Row():
+                        stt_lang_dropdown = gr.Dropdown(
+                            choices=["auto", "hindi", "english", "spanish", "french", "german", "japanese", "chinese"],
+                            value="auto",
+                            label="Language Guidance (Optional)",
+                        )
+                    stt_btn = gr.Button("🎯 Transcribe Audio", variant="primary", size="lg")
+
+                with gr.Column(scale=3):
+                    stt_output_text = gr.Textbox(
+                        label="Transcribed Text Output",
+                        lines=5,
+                        placeholder="Transcribed speech will appear here...",
+                        show_copy_button=True,
+                    )
+                    stt_meta_info = gr.Markdown()
+                    send_to_tts_btn = gr.Button("➡️ Send Transcribed Text to TTS Voice Studio", variant="secondary")
+
+            stt_btn.click(
+                fn=gradio_transcribe_audio,
+                inputs=[audio_input, stt_lang_dropdown],
+                outputs=[stt_output_text, stt_meta_info],
+            )
+
+            send_to_tts_btn.click(
+                lambda t: t,
+                inputs=[stt_output_text],
+                outputs=[text_input],
+            )
+
         with gr.TabItem("📖 Developer API & Integrations"):
             gr.Markdown(
                 """
-                ### 🚀 Direct REST API Endpoints
+                ### 🚀 Direct REST API Endpoints (TTS + STT)
 
                 Hermes exposes full asynchronous REST API routes compatible with any client (Telegram bot, Python, Node.js, React, Curl).
 
-                #### 1. Binary Audio Buffer (`POST /v1/tts/synthesize`)
+                ---
+
+                ### 🎧 Speech-to-Text (STT) Endpoints
+
+                #### 1. Standard Audio Transcription (`POST /v1/stt/transcribe`)
+                Upload any audio file to receive structured JSON with transcribed text, language, and duration.
+                ```bash
+                curl -X POST "https://<your-space>.hf.space/v1/stt/transcribe" \\
+                  -F "file=@sample.mp3" \\
+                  -F "language=auto"
+                ```
+                **Response:**
+                ```json
+                {
+                  "text": "Server ready ho gaya hai. Latency under 200ms hai!",
+                  "language": "hindi",
+                  "duration_ms": 280,
+                  "engine": "whisper (openai/whisper-base)",
+                  "device": "cuda"
+                }
+                ```
+
+                #### 2. OpenAI-Compatible Whisper Endpoint (`POST /v1/audio/transcriptions`)
+                Drop-in replacement for OpenAI Whisper API (`api.openai.com/v1/audio/transcriptions`). Works directly with LangChain, AutoGPT, and OpenAI SDK!
+                ```bash
+                curl -X POST "https://<your-space>.hf.space/v1/audio/transcriptions" \\
+                  -F "file=@sample.wav" \\
+                  -F "model=whisper-1"
+                ```
+                **Response:**
+                ```json
+                {
+                  "text": "Hello world, this is a test audio."
+                }
+                ```
+
+                ---
+
+                ### 🎙️ Text-to-Speech (TTS) Endpoints
+
+                #### 3. Binary Audio Buffer (`POST /v1/tts/synthesize`)
                 Directly returns in-memory audio bytes (`audio/mpeg`, `audio/ogg`, `audio/wav`). Perfect for `bot.send_voice`.
                 ```bash
                 curl -X POST "https://<your-space>.hf.space/v1/tts/synthesize" \\
@@ -250,7 +354,7 @@ with gr.Blocks(title="Hermes Voice Assistant Studio") as demo:
                   }' --output voice.mp3
                 ```
 
-                #### 2. Sentence-Level Audio Stream (`POST /v1/tts/stream`)
+                #### 4. Sentence-Level Audio Stream (`POST /v1/tts/stream`)
                 Ultra-low latency chunked audio streaming (First chunk < 400ms).
                 ```bash
                 curl -X POST "https://<your-space>.hf.space/v1/tts/stream" \\
@@ -259,19 +363,19 @@ with gr.Blocks(title="Hermes Voice Assistant Studio") as demo:
                   --no-buffer --output stream.mp3
                 ```
 
-                #### 3. Clean Text & Prosody Preview (`POST /v1/tts/clean-text`)
+                #### 5. Clean Text & Prosody Preview (`POST /v1/tts/clean-text`)
                 ```bash
                 curl -X POST "https://<your-space>.hf.space/v1/tts/clean-text" \\
                   -H "Content-Type: application/json" \\
                   -d '{"text": "1. Pull repo. 2. Meeting at 15:30 with 500ms latency."}'
                 ```
 
-                #### 4. Supported Voices & Personas (`GET /v1/voices`)
+                #### 6. Supported Voices & Personas (`GET /v1/voices`)
                 ```bash
                 curl -X GET "https://<your-space>.hf.space/v1/voices"
                 ```
 
-                #### 5. Health Check (`GET /health`)
+                #### 7. Health Check (`GET /health`)
                 ```bash
                 curl -X GET "https://<your-space>.hf.space/health"
                 ```
@@ -281,7 +385,8 @@ with gr.Blocks(title="Hermes Voice Assistant Studio") as demo:
         with gr.TabItem("ℹ️ Architecture & Engine Status"):
             gr.Markdown(
                 """
-                ### 🏗️ Unified Hybrid Architecture
+                ### 🏗️ Unified Hybrid Architecture (TTS + STT)
+                - **Whisper STT (OpenAI Whisper Engine):** Multilingual speech recognition running on NVIDIA RTX Pro 6000 Blackwell GPU / CPU. Transcribes Hindi, Hinglish, and English with high accuracy.
                 - **Kokoro-82M (Local CPU Engine):** 82 Million parameter open-weights model running completely on CPU. Sub-200ms latency for pure English text.
                 - **Edge-TTS (Neural Cloud Engine):** Cloud neural Indian voices (`hi-IN-SwaraNeural`, `hi-IN-MadhurNeural`, `en-IN-NeerjaNeural`). Zero GPU requirement.
                 - **ElevenLabs (Studio Engine):** Optional hyper-realistic neural voice for enterprise voice calling.

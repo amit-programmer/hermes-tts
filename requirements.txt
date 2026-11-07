@@ -1,10 +1,12 @@
 gradio>=5.0.0,<6.0.0
 fastapi
 uvicorn[standard]
+python-multipart
 soundfile
 numpy
 python-dotenv
 requests
+transformers>=4.40.0
 kokoro>=0.3.4
 edge-tts>=7.0.0
 elevenlabs

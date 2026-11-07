@@ -17,14 +17,16 @@ license: mit
 [![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11-blue.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Production-ready, multi-engine Voice Assistant server with **Gradio Studio Web UI** and **FastAPI REST API**. Integrates **Kokoro-82M (Local CPU)**, **Edge-TTS (Neural Cloud)**, and **ElevenLabs (Studio)** with intelligent auto-routing between Hinglish and English.
+Production-ready, unified Voice Assistant server with **Gradio Studio Web UI** and **FastAPI REST API**. Integrates **Whisper Speech-to-Text (STT)** with **Kokoro-82M, Edge-TTS, and ElevenLabs Text-to-Speech (TTS)**, accelerated on ZeroGPU (NVIDIA RTX Pro 6000 Blackwell) or CPU.
 
 ---
 
 ## 🌟 Key Highlights
 
-- **Zero GPU Cost:** Runs smoothly on free CPU hardware (HF Free Tier: 2 vCPU, 16GB RAM).
-- **Hinglish & English Auto-Routing:** Romanized Hindi and Hinglish queries are routed to Indian neural voices (`hi-IN-SwaraNeural`), while pure English queries run locally on Kokoro-82M.
+- **Full Voice Cycle (TTS + STT):** Complete end-to-end speech recognition and speech synthesis pipeline in a single container.
+- **Whisper Speech-to-Text (STT):** Multilingual speech transcription for Hindi, Hinglish, English, and 90+ languages. ZeroGPU Blackwell GPU accelerated.
+- **OpenAI-Compatible STT API:** `/v1/audio/transcriptions` endpoint works as a direct drop-in replacement for OpenAI Whisper in LangChain, AutoGPT, and mobile apps.
+- **Hinglish & English TTS Auto-Routing:** Romanized Hindi and Hinglish queries are routed to Indian neural voices (`hi-IN-SwaraNeural`), while pure English queries run locally on Kokoro-82M.
 - **Ultra-Fast Chunk Streaming:** Sentence-level producer-consumer pipeline with Time-To-First-Audio (TTFA) < 400ms.
 - **Developer Lexicon Engine:** Automatically expands technical terms (`API`, `JWT`, `SQL`, `SSH`, `DNS`), file paths (`src/auth/jwt.py`), terminal commands (`git commit -m`), logic operators (`&&`, `!=`), 24h times, and currency symbols (`$`, `₹`).
 - **Smooth Audio Boundary Transitions:** 4ms cosine fade in/out prevents boundary clicks and pops during chunk stitching.
