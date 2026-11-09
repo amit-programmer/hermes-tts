@@ -86,107 +86,40 @@ class WhisperEngine:
         return self._pipe
 
     @staticmethod
-    def _normalize_audio_to_wav(audio_input: Union[str, bytes, io.BytesIO], filename: Optional[str] = None) -> Tuple[str, list]:
+    def _load_audio_array(audio_input: Union[str, bytes, io.BytesIO]) -> np.ndarray:
         """
-        Converts any audio input (WAV, MP3, WEBM, OGG, M4A, FLAC, raw bytes, extensionless files)
-        into a standard 16,000 Hz mono PCM WAV file that Whisper & soundfile read flawlessly.
-        Returns (path_to_wav, list_of_temporary_files_to_cleanup).
+        Robustly loads any audio input (filepath, bytes, BytesIO) into a 1D float32 16kHz NumPy array.
+        Uses transformers.pipelines.audio_utils.ffmpeg_read (natively decodes MP3, WAV, WEBM, OGG, M4A, AAC, FLAC).
         """
-        cleanup_files = []
-        raw_tmp_path = None
-
-        # 1. Infer extension from filename or audio magic bytes
-        ext = ".bin"
-        if filename and "." in filename:
-            ext = Path(filename).suffix.lower()
-
         if isinstance(audio_input, (bytes, bytearray)):
-            if audio_input.startswith(b"RIFF"):
-                ext = ".wav"
-            elif audio_input.startswith(b"ID3") or (len(audio_input) > 2 and audio_input[0] == 0xFF and (audio_input[1] & 0xE0) == 0xE0):
-                ext = ".mp3"
-            elif audio_input.startswith(b"OggS"):
-                ext = ".ogg"
-            elif audio_input.startswith(b"\x1a\x45\xdf\xa3"):
-                ext = ".webm"
-            elif audio_input.startswith(b"fLaC"):
-                ext = ".flac"
-            elif b"ftyp" in audio_input[:16]:
-                ext = ".m4a"
-
-            raw_tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-            raw_tmp.write(audio_input)
-            raw_tmp.flush()
-            raw_tmp.close()
-            raw_tmp_path = raw_tmp.name
-            cleanup_files.append(raw_tmp_path)
-
+            audio_bytes = bytes(audio_input)
         elif isinstance(audio_input, io.BytesIO):
-            val = audio_input.getvalue()
-            if val.startswith(b"RIFF"):
-                ext = ".wav"
-            elif val.startswith(b"ID3") or (len(val) > 2 and val[0] == 0xFF and (val[1] & 0xE0) == 0xE0):
-                ext = ".mp3"
-            elif val.startswith(b"OggS"):
-                ext = ".ogg"
-            elif val.startswith(b"\x1a\x45\xdf\xa3"):
-                ext = ".webm"
-            elif val.startswith(b"fLaC"):
-                ext = ".flac"
-            elif b"ftyp" in val[:16]:
-                ext = ".m4a"
-
-            raw_tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-            raw_tmp.write(val)
-            raw_tmp.flush()
-            raw_tmp.close()
-            raw_tmp_path = raw_tmp.name
-            cleanup_files.append(raw_tmp_path)
-
+            audio_bytes = audio_input.getvalue()
         elif isinstance(audio_input, str):
-            raw_tmp_path = audio_input
+            with open(audio_input, "rb") as f:
+                audio_bytes = f.read()
         else:
             raise ValueError(f"Unsupported audio input type: {type(audio_input)}")
 
-        # 2. Allocate output 16kHz WAV temporary file
-        wav_tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        wav_tmp.close()
-        wav_tmp_path = wav_tmp.name
-        cleanup_files.append(wav_tmp_path)
-
-        # 3. Primary Conversion: Use ffmpeg (installed in Space packages.txt)
-        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
-        ffmpeg_success = False
+        # 1. Native transformers decoder via ffmpeg_read
         try:
-            cmd = [
-                ffmpeg_bin,
-                "-y",
-                "-i", raw_tmp_path,
-                "-ar", "16000",
-                "-ac", "1",
-                "-c:a", "pcm_s16le",
-                wav_tmp_path,
-            ]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
-            if res.returncode == 0 and os.path.exists(wav_tmp_path) and os.path.getsize(wav_tmp_path) > 44:
-                ffmpeg_success = True
-        except Exception:
-            ffmpeg_success = False
+            from transformers.pipelines.audio_utils import ffmpeg_read
+            audio_array = ffmpeg_read(audio_bytes, sampling_rate=16000)
+            if audio_array.ndim > 1:
+                audio_array = audio_array.mean(axis=1)
+            return audio_array.astype(np.float32)
+        except Exception as e:
+            print(f"[STT] ffmpeg_read fallback notice: {e}")
 
-        # 4. Fallback Conversion: Use soundfile in-memory read & write
-        if not ffmpeg_success:
-            try:
-                import soundfile as sf
-                data, sr = sf.read(raw_tmp_path, dtype="float32")
-                if len(data.shape) > 1:
-                    data = np.mean(data, axis=1)
-                sf.write(wav_tmp_path, data, 16000, format="WAV", subtype="PCM_16")
-                ffmpeg_success = True
-            except Exception:
-                # If conversion fails, return raw file as fallback
-                return raw_tmp_path, cleanup_files
-
-        return wav_tmp_path, cleanup_files
+        # 2. In-memory soundfile fallback
+        try:
+            import soundfile as sf
+            data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+            if data.ndim > 1:
+                data = data.mean(axis=1)
+            return data.astype(np.float32)
+        except Exception as sf_e:
+            raise RuntimeError(f"Failed to decode audio: {sf_e}")
 
     def transcribe(
         self,
@@ -197,13 +130,13 @@ class WhisperEngine:
     ) -> Dict[str, Any]:
         """
         Transcribes speech from audio input into text.
-        Supports all audio formats (MP3, WAV, WEBM, OGG, M4A, etc.) and auto-converts to 16kHz WAV.
+        Supports all audio formats (MP3, WAV, WEBM, OGG, M4A, etc.) via direct NumPy payload.
 
         Args:
             audio_input: File path (str), raw audio bytes, or BytesIO buffer.
             language: Optional language code (e.g. 'hindi', 'english', 'hi', 'en').
             task: 'transcribe' or 'translate'.
-            filename: Original file name if available (used for format detection).
+            filename: Original file name if available.
 
         Returns:
             Dict containing 'text', 'language', 'duration_ms', and 'engine'.
@@ -211,73 +144,65 @@ class WhisperEngine:
         t0 = time.time()
         pipe = self._get_pipeline()
 
-        target_path, cleanup_files = self._normalize_audio_to_wav(audio_input, filename=filename)
+        audio_array = self._load_audio_array(audio_input)
+        payload = {"sampling_rate": 16000, "raw": audio_array}
 
+        # 1. Build generation kwargs
+        generate_kwargs = {"task": task}
+        if language and language.lower() not in ["auto", "none", ""]:
+            lang_code = language.lower().strip()
+            lang_map = {
+                "hindi": "hindi",
+                "hi": "hindi",
+                "english": "english",
+                "en": "english",
+                "hinglish": "hindi",
+            }
+            generate_kwargs["language"] = lang_map.get(lang_code, lang_code)
+
+        # 2. Perform transcription
         try:
-            # 1. Build generation kwargs
-            generate_kwargs = {"task": task}
-            if language and language.lower() not in ["auto", "none", ""]:
-                lang_code = language.lower().strip()
-                lang_map = {
-                    "hindi": "hindi",
-                    "hi": "hindi",
-                    "english": "english",
-                    "en": "english",
-                    "hinglish": "hindi",
-                }
-                generate_kwargs["language"] = lang_map.get(lang_code, lang_code)
-
-            # 2. Perform transcription
-            try:
-                result = pipe(
-                    target_path,
+            result = pipe(
+                payload,
+                chunk_length_s=30,
+                generate_kwargs=generate_kwargs,
+                return_timestamps=False,
+            )
+        except Exception as pipe_err:
+            err_msg = str(pipe_err).lower()
+            if "cuda" in err_msg or "torch._c._cuda_init" in err_msg:
+                print(f"[STT] CUDA error during forward pass: {pipe_err}. Retrying on CPU...")
+                import torch
+                from transformers import pipeline
+                self._device = "cpu"
+                self._pipe = pipeline(
+                    task="automatic-speech-recognition",
+                    model=self.model_id,
+                    torch_dtype=torch.float32,
+                    device="cpu",
+                )
+                result = self._pipe(
+                    payload,
                     chunk_length_s=30,
                     generate_kwargs=generate_kwargs,
                     return_timestamps=False,
                 )
-            except Exception as pipe_err:
-                err_msg = str(pipe_err).lower()
-                if "cuda" in err_msg or "torch._c._cuda_init" in err_msg:
-                    print(f"[STT] CUDA error during forward pass: {pipe_err}. Retrying on CPU...")
-                    import torch
-                    from transformers import pipeline
-                    self._device = "cpu"
-                    self._pipe = pipeline(
-                        task="automatic-speech-recognition",
-                        model=self.model_id,
-                        torch_dtype=torch.float32,
-                        device="cpu",
-                    )
-                    result = self._pipe(
-                        target_path,
-                        chunk_length_s=30,
-                        generate_kwargs=generate_kwargs,
-                        return_timestamps=False,
-                    )
-                else:
-                    raise
+            else:
+                raise
 
-            transcribed_text = ""
-            if isinstance(result, dict):
-                transcribed_text = result.get("text", "").strip()
-            elif isinstance(result, str):
-                transcribed_text = result.strip()
+        transcribed_text = ""
+        if isinstance(result, dict):
+            transcribed_text = result.get("text", "").strip()
+        elif isinstance(result, str):
+            transcribed_text = result.strip()
 
-            elapsed_ms = int((time.time() - t0) * 1000)
+        elapsed_ms = int((time.time() - t0) * 1000)
 
-            return {
-                "text": transcribed_text,
-                "language": generate_kwargs.get("language", "auto-detected"),
-                "duration_ms": elapsed_ms,
-                "engine": f"whisper ({self.model_id})",
-                "device": self._get_device(),
-            }
-
-        finally:
-            for p in cleanup_files:
-                if p and os.path.exists(p):
-                    try:
-                        os.remove(p)
-                    except Exception:
-                        pass
+        return {
+            "text": transcribed_text,
+            "language": generate_kwargs.get("language", "auto-detected"),
+            "duration_ms": elapsed_ms,
+            "engine": f"whisper ({self.model_id})",
+            "device": self._get_device(),
+        }
 
