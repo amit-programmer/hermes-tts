@@ -2,8 +2,10 @@ import os
 import time
 import tempfile
 import io
+import shutil
+import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, Tuple
 
 import numpy as np
 
@@ -83,19 +85,125 @@ class WhisperEngine:
                     )
         return self._pipe
 
+    @staticmethod
+    def _normalize_audio_to_wav(audio_input: Union[str, bytes, io.BytesIO], filename: Optional[str] = None) -> Tuple[str, list]:
+        """
+        Converts any audio input (WAV, MP3, WEBM, OGG, M4A, FLAC, raw bytes, extensionless files)
+        into a standard 16,000 Hz mono PCM WAV file that Whisper & soundfile read flawlessly.
+        Returns (path_to_wav, list_of_temporary_files_to_cleanup).
+        """
+        cleanup_files = []
+        raw_tmp_path = None
+
+        # 1. Infer extension from filename or audio magic bytes
+        ext = ".bin"
+        if filename and "." in filename:
+            ext = Path(filename).suffix.lower()
+
+        if isinstance(audio_input, (bytes, bytearray)):
+            if audio_input.startswith(b"RIFF"):
+                ext = ".wav"
+            elif audio_input.startswith(b"ID3") or (len(audio_input) > 2 and audio_input[0] == 0xFF and (audio_input[1] & 0xE0) == 0xE0):
+                ext = ".mp3"
+            elif audio_input.startswith(b"OggS"):
+                ext = ".ogg"
+            elif audio_input.startswith(b"\x1a\x45\xdf\xa3"):
+                ext = ".webm"
+            elif audio_input.startswith(b"fLaC"):
+                ext = ".flac"
+            elif b"ftyp" in audio_input[:16]:
+                ext = ".m4a"
+
+            raw_tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+            raw_tmp.write(audio_input)
+            raw_tmp.flush()
+            raw_tmp.close()
+            raw_tmp_path = raw_tmp.name
+            cleanup_files.append(raw_tmp_path)
+
+        elif isinstance(audio_input, io.BytesIO):
+            val = audio_input.getvalue()
+            if val.startswith(b"RIFF"):
+                ext = ".wav"
+            elif val.startswith(b"ID3") or (len(val) > 2 and val[0] == 0xFF and (val[1] & 0xE0) == 0xE0):
+                ext = ".mp3"
+            elif val.startswith(b"OggS"):
+                ext = ".ogg"
+            elif val.startswith(b"\x1a\x45\xdf\xa3"):
+                ext = ".webm"
+            elif val.startswith(b"fLaC"):
+                ext = ".flac"
+            elif b"ftyp" in val[:16]:
+                ext = ".m4a"
+
+            raw_tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+            raw_tmp.write(val)
+            raw_tmp.flush()
+            raw_tmp.close()
+            raw_tmp_path = raw_tmp.name
+            cleanup_files.append(raw_tmp_path)
+
+        elif isinstance(audio_input, str):
+            raw_tmp_path = audio_input
+        else:
+            raise ValueError(f"Unsupported audio input type: {type(audio_input)}")
+
+        # 2. Allocate output 16kHz WAV temporary file
+        wav_tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        wav_tmp.close()
+        wav_tmp_path = wav_tmp.name
+        cleanup_files.append(wav_tmp_path)
+
+        # 3. Primary Conversion: Use ffmpeg (installed in Space packages.txt)
+        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+        ffmpeg_success = False
+        try:
+            cmd = [
+                ffmpeg_bin,
+                "-y",
+                "-i", raw_tmp_path,
+                "-ar", "16000",
+                "-ac", "1",
+                "-c:a", "pcm_s16le",
+                wav_tmp_path,
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            if res.returncode == 0 and os.path.exists(wav_tmp_path) and os.path.getsize(wav_tmp_path) > 44:
+                ffmpeg_success = True
+        except Exception:
+            ffmpeg_success = False
+
+        # 4. Fallback Conversion: Use soundfile in-memory read & write
+        if not ffmpeg_success:
+            try:
+                import soundfile as sf
+                data, sr = sf.read(raw_tmp_path, dtype="float32")
+                if len(data.shape) > 1:
+                    data = np.mean(data, axis=1)
+                sf.write(wav_tmp_path, data, 16000, format="WAV", subtype="PCM_16")
+                ffmpeg_success = True
+            except Exception:
+                # If conversion fails, return raw file as fallback
+                return raw_tmp_path, cleanup_files
+
+        return wav_tmp_path, cleanup_files
+
     def transcribe(
         self,
         audio_input: Union[str, bytes, io.BytesIO],
         language: Optional[str] = None,
         task: str = "transcribe",
+        filename: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Transcribes speech from audio input into text.
+        Supports all audio formats (MP3, WAV, WEBM, OGG, M4A, etc.) and auto-converts to 16kHz WAV.
 
         Args:
             audio_input: File path (str), raw audio bytes, or BytesIO buffer.
             language: Optional language code (e.g. 'hindi', 'english', 'hi', 'en').
             task: 'transcribe' or 'translate'.
+            filename: Original file name if available (used for format detection).
 
         Returns:
             Dict containing 'text', 'language', 'duration_ms', and 'engine'.
@@ -103,35 +211,13 @@ class WhisperEngine:
         t0 = time.time()
         pipe = self._get_pipeline()
 
-        temp_path = None
-        target_path = None
+        target_path, cleanup_files = self._normalize_audio_to_wav(audio_input, filename=filename)
 
         try:
-            # 1. Resolve audio input into a filepath if bytes were passed
-            if isinstance(audio_input, (bytes, bytearray)):
-                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                tmp.write(audio_input)
-                tmp.flush()
-                tmp.close()
-                temp_path = tmp.name
-                target_path = temp_path
-            elif isinstance(audio_input, io.BytesIO):
-                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                tmp.write(audio_input.getvalue())
-                tmp.flush()
-                tmp.close()
-                temp_path = tmp.name
-                target_path = temp_path
-            elif isinstance(audio_input, str):
-                target_path = audio_input
-            else:
-                raise ValueError(f"Unsupported audio input type: {type(audio_input)}")
-
-            # 2. Build generation kwargs
+            # 1. Build generation kwargs
             generate_kwargs = {"task": task}
             if language and language.lower() not in ["auto", "none", ""]:
                 lang_code = language.lower().strip()
-                # Map common language names
                 lang_map = {
                     "hindi": "hindi",
                     "hi": "hindi",
@@ -141,7 +227,7 @@ class WhisperEngine:
                 }
                 generate_kwargs["language"] = lang_map.get(lang_code, lang_code)
 
-            # 3. Perform transcription
+            # 2. Perform transcription
             try:
                 result = pipe(
                     target_path,
@@ -188,10 +274,10 @@ class WhisperEngine:
             }
 
         finally:
-            # Clean up temporary file if created
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
+            for p in cleanup_files:
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
 

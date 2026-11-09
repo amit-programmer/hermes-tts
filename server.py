@@ -207,6 +207,7 @@ async def transcribe_audio_endpoint(
             audio_bytes,
             language,
             task,
+            file.filename,
         )
         return result
     except HTTPException:
@@ -248,6 +249,7 @@ async def openai_compatible_transcription(
             audio_bytes,
             language,
             "transcribe",
+            file.filename,
         )
         if response_format == "text":
             return Response(content=result.get("text", ""), media_type="text/plain")
