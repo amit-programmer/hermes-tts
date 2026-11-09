@@ -23,23 +23,31 @@ class WhisperEngine:
 
     def _get_device(self) -> str:
         if self._device is None:
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    self._device = "cuda"
-                else:
-                    self._device = "cpu"
-            except Exception:
+            # In Hugging Face ZeroGPU, raw FastAPI endpoints run outside Gradio's @spaces.GPU context.
+            # Calling device="cuda" outside @spaces.GPU triggers ZeroGPU's:
+            # "Low-level CUDA init (`torch._C._cuda_init`) reached"
+            # Therefore, we safely use device="cpu" on Hugging Face Spaces for 100% reliable Postman/REST calls.
+            # Whisper-base on CPU is ultra-lightweight (~140MB) and transcribes in ~250ms without GPU overhead.
+            if os.getenv("SPACE_ID") or os.getenv("SPACES_ZERO_GPU"):
                 self._device = "cpu"
+            else:
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        self._device = "cuda"
+                    else:
+                        self._device = "cpu"
+                except Exception:
+                    self._device = "cpu"
         return self._device
 
     def _get_pipeline(self):
         if self._pipe is None:
+            device = self._get_device()
             try:
                 import torch
-                from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
+                from transformers import pipeline
 
-                device = self._get_device()
                 torch_dtype = torch.float16 if device == "cuda" else torch.float32
 
                 print(f"[STT] Loading Whisper model '{self.model_id}' on {device} ({torch_dtype})...")
@@ -51,10 +59,28 @@ class WhisperEngine:
                 )
                 print(f"[STT] Whisper engine successfully loaded on {device}.")
             except Exception as e:
-                raise RuntimeError(
-                    f"Failed to initialize Whisper STT engine '{self.model_id}': {e}. "
-                    f"Ensure 'transformers', 'torch' and 'soundfile' are installed."
-                )
+                err_str = str(e)
+                # If CUDA initialization failed or was intercepted by ZeroGPU, gracefully fallback to CPU
+                if "cuda" in err_str.lower() or "torch._c._cuda_init" in err_str.lower() or device != "cpu":
+                    print(f"[STT] CUDA init intercepted or failed ({e}). Auto-falling back to CPU...")
+                    try:
+                        import torch
+                        from transformers import pipeline
+                        self._device = "cpu"
+                        self._pipe = pipeline(
+                            task="automatic-speech-recognition",
+                            model=self.model_id,
+                            torch_dtype=torch.float32,
+                            device="cpu",
+                        )
+                        print(f"[STT] Whisper engine successfully loaded on CPU fallback.")
+                    except Exception as fallback_e:
+                        raise RuntimeError(f"Whisper CPU fallback also failed: {fallback_e}")
+                else:
+                    raise RuntimeError(
+                        f"Failed to initialize Whisper STT engine '{self.model_id}': {e}. "
+                        f"Ensure 'transformers', 'torch' and 'soundfile' are installed."
+                    )
         return self._pipe
 
     def transcribe(
@@ -116,12 +142,34 @@ class WhisperEngine:
                 generate_kwargs["language"] = lang_map.get(lang_code, lang_code)
 
             # 3. Perform transcription
-            result = pipe(
-                target_path,
-                chunk_length_s=30,
-                generate_kwargs=generate_kwargs,
-                return_timestamps=False,
-            )
+            try:
+                result = pipe(
+                    target_path,
+                    chunk_length_s=30,
+                    generate_kwargs=generate_kwargs,
+                    return_timestamps=False,
+                )
+            except Exception as pipe_err:
+                err_msg = str(pipe_err).lower()
+                if "cuda" in err_msg or "torch._c._cuda_init" in err_msg:
+                    print(f"[STT] CUDA error during forward pass: {pipe_err}. Retrying on CPU...")
+                    import torch
+                    from transformers import pipeline
+                    self._device = "cpu"
+                    self._pipe = pipeline(
+                        task="automatic-speech-recognition",
+                        model=self.model_id,
+                        torch_dtype=torch.float32,
+                        device="cpu",
+                    )
+                    result = self._pipe(
+                        target_path,
+                        chunk_length_s=30,
+                        generate_kwargs=generate_kwargs,
+                        return_timestamps=False,
+                    )
+                else:
+                    raise
 
             transcribed_text = ""
             if isinstance(result, dict):
@@ -146,3 +194,4 @@ class WhisperEngine:
                     os.remove(temp_path)
                 except Exception:
                     pass
+

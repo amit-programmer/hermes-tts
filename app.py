@@ -1,6 +1,20 @@
 import os
 import sys
 
+# 1. ZeroGPU compatibility guard & decorator (MUST BE FIRST BEFORE ANY TORCH/ML IMPORTS)
+try:
+    import spaces
+    print("[HERMES] Hugging Face ZeroGPU detected.")
+except ImportError:
+    class MockSpaces:
+        @staticmethod
+        def GPU(duration=60):
+            def decorator(func):
+                return func
+            return decorator
+    spaces = MockSpaces()
+    print("[HERMES] Running in standard CPU mode.")
+
 # Disable Gradio SSR Node.js proxy from binding to port 7860 before Uvicorn
 os.environ["GRADIO_SSR_MODE"] = "false"
 
@@ -30,20 +44,6 @@ from utils.text_cleaner import (
     split_into_sentences,
 )
 from utils.audio_processor import convert_audio_format, stitch_audio_chunks
-
-# ZeroGPU compatibility guard & decorator
-try:
-    import spaces
-    print("[HERMES] Hugging Face ZeroGPU detected.")
-except ImportError:
-    class MockSpaces:
-        @staticmethod
-        def GPU(duration=60):
-            def decorator(func):
-                return func
-            return decorator
-    spaces = MockSpaces()
-    print("[HERMES] Running in standard CPU mode.")
 
 
 async def gradio_synthesize(text: str, engine: str, persona: str, voice_profile: str, audio_format: str):
